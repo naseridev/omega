@@ -16,6 +16,9 @@ struct Args {
     #[arg(required = true, help = "Search patterns")]
     patterns: Vec<String>,
 
+    #[arg(short = 'p', long, help = "Search paths (can be used multiple times)")]
+    path: Vec<PathBuf>,
+
     #[arg(short = 'l', long, help = "Limit number of results found")]
     limit_found: Option<u64>,
 
@@ -400,7 +403,11 @@ impl SearchResult {
 struct RootPathProvider;
 
 impl RootPathProvider {
-    fn get_search_roots() -> Vec<PathBuf> {
+    fn get_search_roots(custom_paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        if !custom_paths.is_empty() {
+            return custom_paths;
+        }
+
         let mut roots = Vec::new();
 
         #[cfg(target_os = "windows")]
@@ -426,9 +433,10 @@ impl RootPathProvider {
 fn main() {
     let args = Args::parse();
     let quiet = args.quiet;
+    let custom_paths = args.path.clone();
 
     let engine = SearchEngine::new(&args);
-    let roots = RootPathProvider::get_search_roots();
+    let roots = RootPathProvider::get_search_roots(custom_paths);
 
     let start = Instant::now();
     let result = engine.search(roots);
