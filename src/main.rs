@@ -15,7 +15,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(name = "omega")]
 #[command(version = VERSION)]
 #[command(about = "Blazing fast cross-platform file search", long_about = None)]
-#[command(author = "Omega Contributors")]
+#[command(author = "Nima Naseri")]
 struct Args {
     #[arg(required = true, help = "Search patterns")]
     patterns: Vec<String>,
