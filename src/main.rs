@@ -1,12 +1,11 @@
 use clap::Parser;
 use crossbeam::channel::{Sender, unbounded};
 use rayon::prelude::*;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -42,17 +41,11 @@ struct Args {
     #[arg(short = 'i', long, help = "Case-insensitive search")]
     case_insensitive: bool,
 
-    #[arg(short = 'q', long, help = "Quiet mode - only print paths")]
-    quiet: bool,
-
     #[arg(short = 'f', long, help = "Search only files")]
     files_only: bool,
 
     #[arg(short = 'D', long, help = "Search only directories")]
     dirs_only: bool,
-
-    #[arg(short = 'v', long, help = "Verbose output")]
-    verbose: bool,
 
     #[arg(short = 'e', long, help = "Hide errors")]
     hide_errors: bool,
@@ -67,46 +60,249 @@ struct Args {
         help = "Fuzzy search distance threshold"
     )]
     fuzzy_threshold: usize,
+
+    #[arg(long, help = "API mode - output as CSV format")]
+    api: bool,
 }
 
+#[derive(Debug, Clone)]
+struct FileInfo {
+    path: String,
+    name: String,
+    is_dir: bool,
+    is_file: bool,
+    size: u64,
+    size_human: String,
+    modified: u64,
+    modified_human: String,
+    is_hidden: bool,
+    extension: String,
+    permissions: String,
+}
+
+impl FileInfo {
+    fn from_path(path: &Path) -> Result<Self, std::io::Error> {
+        let metadata = std::fs::metadata(path)?;
+        let is_dir = metadata.is_dir();
+        let is_file = metadata.is_file();
+
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let extension = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        let size = if is_file { metadata.len() } else { 0 };
+        let size_human = format_size(size);
+
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let modified_human = format_timestamp(modified);
+
+        let is_hidden = is_hidden_file(path, &name);
+
+        let permissions = format_permissions(&metadata);
+
+        Ok(FileInfo {
+            path: path.display().to_string(),
+            name,
+            is_dir,
+            is_file,
+            size,
+            size_human,
+            modified,
+            modified_human,
+            is_hidden,
+            extension,
+            permissions,
+        })
+    }
+
+    fn to_csv(&self) -> String {
+        format!(
+            "{},{},{},{},{},{},{},{},{},{},{}",
+            escape_csv(&self.path),
+            escape_csv(&self.name),
+            self.is_dir,
+            self.is_file,
+            self.size,
+            escape_csv(&self.size_human),
+            self.modified,
+            escape_csv(&self.modified_human),
+            self.is_hidden,
+            escape_csv(&self.extension),
+            escape_csv(&self.permissions)
+        )
+    }
+
+    fn csv_header() -> &'static str {
+        "path,name,is_dir,is_file,size,size_human,modified,modified_human,is_hidden,extension,permissions"
+    }
+}
+
+fn is_hidden_file(path: &Path, _name: &str) -> bool {
+    #[cfg(unix)]
+    {
+        _name.starts_with('.')
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+            (metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
+        } else {
+            false
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        _name.starts_with('.')
+    }
+}
+
+fn escape_csv(s: &str) -> String {
+    if s.contains(',')
+        || s.contains('"')
+        || s.contains('\n')
+        || s.contains('\r')
+        || s.contains('\t')
+    {
+        format!("\"{}\"", s.replace("\"", "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+#[cfg(unix)]
+fn format_permissions(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = metadata.permissions().mode();
+
+    let user = format!(
+        "{}{}{}",
+        if mode & 0o400 != 0 { "r" } else { "-" },
+        if mode & 0o200 != 0 { "w" } else { "-" },
+        if mode & 0o100 != 0 { "x" } else { "-" }
+    );
+
+    let group = format!(
+        "{}{}{}",
+        if mode & 0o040 != 0 { "r" } else { "-" },
+        if mode & 0o020 != 0 { "w" } else { "-" },
+        if mode & 0o010 != 0 { "x" } else { "-" }
+    );
+
+    let other = format!(
+        "{}{}{}",
+        if mode & 0o004 != 0 { "r" } else { "-" },
+        if mode & 0o002 != 0 { "w" } else { "-" },
+        if mode & 0o001 != 0 { "x" } else { "-" }
+    );
+
+    format!("{}{}{}", user, group, other)
+}
+
+#[cfg(windows)]
+fn format_permissions(metadata: &std::fs::Metadata) -> String {
+    let readonly = metadata.permissions().readonly();
+    if readonly {
+        "r--r--r--".to_string()
+    } else {
+        "rw-rw-rw-".to_string()
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn format_permissions(_metadata: &std::fs::Metadata) -> String {
+    "rwxrwxrwx".to_string()
+}
+
+fn format_timestamp(timestamp: u64) -> String {
+    const SECONDS_PER_DAY: u64 = 86400;
+    const SECONDS_PER_HOUR: u64 = 3600;
+    const SECONDS_PER_MINUTE: u64 = 60;
+
+    let mut remaining = timestamp;
+
+    let days = remaining / SECONDS_PER_DAY;
+    remaining %= SECONDS_PER_DAY;
+
+    let hours = remaining / SECONDS_PER_HOUR;
+    remaining %= SECONDS_PER_HOUR;
+
+    let minutes = remaining / SECONDS_PER_MINUTE;
+    let seconds = remaining % SECONDS_PER_MINUTE;
+
+    let (year, month, day) = days_to_date(days);
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hours, minutes, seconds
+    )
+}
+
+fn days_to_date(days_since_epoch: u64) -> (u32, u32, u32) {
+    let mut year = 1970u32;
+    let mut remaining_days = days_since_epoch;
+
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+
+        if remaining_days < days_in_year as u64 {
+            break;
+        }
+
+        remaining_days -= days_in_year as u64;
+        year += 1;
+    }
+
+    let days_in_months = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1u32;
+    for &days_in_month in &days_in_months {
+        if remaining_days < days_in_month as u64 {
+            break;
+        }
+        remaining_days -= days_in_month as u64;
+        month += 1;
+    }
+
+    let day = (remaining_days + 1) as u32;
+
+    (year, month, day)
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+#[derive(Debug, Clone, Copy)]
 enum OutputMode {
     Normal,
-    Quiet,
-    Verbose,
+    Api,
 }
 
 impl OutputMode {
     fn from_args(args: &Args) -> Self {
-        if args.quiet {
-            Self::Quiet
-        } else if args.verbose {
-            Self::Verbose
-        } else {
-            Self::Normal
-        }
-    }
-
-    fn format_result(&self, path: &Path, is_dir: bool) -> String {
-        match self {
-            Self::Quiet => format!("{}", path.display()),
-            Self::Normal => {
-                let marker = if is_dir { "[D]" } else { "[F]" };
-                format!("{} {}", marker, path.display())
-            }
-            Self::Verbose => {
-                let type_str = if is_dir { "DIR " } else { "FILE" };
-                let metadata = std::fs::metadata(path);
-                let size = metadata
-                    .map(|m| m.len())
-                    .map(|s| format_size(s))
-                    .unwrap_or_else(|_| "unknown".to_string());
-                format!("[{}] {:>10} {}", type_str, size, path.display())
-            }
-        }
-    }
-
-    fn should_show_progress(&self) -> bool {
-        !matches!(self, Self::Quiet)
+        if args.api { Self::Api } else { Self::Normal }
     }
 }
 
@@ -283,7 +479,7 @@ impl PatternMatcher {
 
                 let words: Vec<&str> = target.split(|c: char| !c.is_alphanumeric()).collect();
                 words.iter().any(|word| {
-                    if word.len() > 0 {
+                    if !word.is_empty() {
                         levenshtein_distance(p, word) <= self.threshold
                     } else {
                         false
@@ -301,7 +497,6 @@ struct SearchConfig {
     max_depth: Option<usize>,
     files_only: bool,
     dirs_only: bool,
-    hide_errors: bool,
 }
 
 impl SearchConfig {
@@ -317,7 +512,6 @@ impl SearchConfig {
             max_depth: args.max_depth,
             files_only: args.files_only,
             dirs_only: args.dirs_only,
-            hide_errors: args.hide_errors,
         }
     }
 
@@ -330,6 +524,10 @@ impl SearchConfig {
         }
         true
     }
+}
+
+fn can_access_path(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok()
 }
 
 struct FileSystemScanner {
@@ -354,25 +552,25 @@ impl FileSystemScanner {
         }
     }
 
-    fn scan_directory(&self, root: &Path, tx: Sender<(PathBuf, bool)>) {
-        let mut walker = WalkDir::new(root);
+    fn scan_directory(&self, root: &Path, tx: Sender<FileInfo>) {
+        let mut walker = WalkDir::new(root).follow_links(false);
 
         if let Some(depth) = self.config.max_depth {
             walker = walker.max_depth(depth);
         }
 
-        for entry_result in walker.into_iter() {
+        for entry_result in walker
+            .into_iter()
+            .filter_entry(|e| can_access_path(e.path()))
+        {
             if !self.limits.should_continue(&self.metrics) {
                 break;
             }
 
             let entry = match entry_result {
                 Ok(e) => e,
-                Err(e) => {
+                Err(_) => {
                     self.metrics.increment_errors();
-                    if !self.config.hide_errors {
-                        eprintln!("omega: error: {}", e);
-                    }
                     continue;
                 }
             };
@@ -389,56 +587,13 @@ impl FileSystemScanner {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if self.matcher.matches(name) {
                     self.metrics.increment_found();
-                    let _ = tx.send((path.to_path_buf(), is_dir));
+
+                    if let Ok(file_info) = FileInfo::from_path(path) {
+                        let _ = tx.send(file_info);
+                    }
                 }
             }
         }
-    }
-}
-
-struct ProgressReporter {
-    metrics: SearchMetrics,
-    show_progress: bool,
-}
-
-impl ProgressReporter {
-    fn new(metrics: SearchMetrics, show_progress: bool) -> Self {
-        Self {
-            metrics,
-            show_progress,
-        }
-    }
-
-    fn run(&self) {
-        if !self.show_progress {
-            return;
-        }
-
-        let mut stdout = io::stdout();
-        let mut last_scanned = 0u64;
-
-        loop {
-            thread::sleep(Duration::from_millis(300));
-
-            if self.metrics.is_shutdown() {
-                break;
-            }
-
-            let current_scanned = self.metrics.get_scanned();
-            let current_found = self.metrics.get_found();
-
-            if current_scanned > last_scanned {
-                eprint!(
-                    "\r\x1b[Komega: {} scanned | {} found",
-                    current_scanned, current_found
-                );
-                let _ = stdout.flush();
-                last_scanned = current_scanned;
-            }
-        }
-
-        eprint!("\r\x1b[K");
-        let _ = stdout.flush();
     }
 }
 
@@ -453,10 +608,17 @@ impl ResultPrinter {
 
     fn run<R>(&self, rx: R)
     where
-        R: Iterator<Item = (PathBuf, bool)>,
+        R: Iterator<Item = FileInfo>,
     {
-        for (path, is_dir) in rx {
-            println!("{}", self.output_mode.format_result(&path, is_dir));
+        if matches!(self.output_mode, OutputMode::Api) {
+            println!("{}", FileInfo::csv_header());
+        }
+
+        for file_info in rx {
+            match self.output_mode {
+                OutputMode::Normal => println!("{}", file_info.path),
+                OutputMode::Api => println!("{}", file_info.to_csv()),
+            }
         }
     }
 }
@@ -485,37 +647,17 @@ impl SearchEngine {
         }
     }
 
-    fn search(&self, roots: Vec<PathBuf>) -> SearchResult {
+    fn search(&self, roots: Vec<PathBuf>) -> Result<SearchResult, String> {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.config.threads)
             .build()
-            .unwrap();
+            .map_err(|e| format!("Failed to create thread pool: {}", e))?;
 
-        let (tx, rx) = unbounded::<(PathBuf, bool)>();
+        let (tx, rx) = unbounded::<FileInfo>();
 
-        let reporter = ProgressReporter::new(
-            SearchMetrics {
-                found: Arc::clone(&self.scanner.metrics.found),
-                scanned: Arc::clone(&self.scanner.metrics.scanned),
-                errors: Arc::clone(&self.scanner.metrics.errors),
-                shutdown: Arc::clone(&self.scanner.metrics.shutdown),
-            },
-            self.output_mode.should_show_progress(),
-        );
+        let printer = ResultPrinter::new(self.output_mode);
 
-        let progress_handle = thread::spawn(move || {
-            reporter.run();
-        });
-
-        let printer = ResultPrinter::new(match self.output_mode {
-            OutputMode::Quiet => OutputMode::Quiet,
-            OutputMode::Verbose => OutputMode::Verbose,
-            OutputMode::Normal => OutputMode::Normal,
-        });
-
-        let printer_handle = thread::spawn(move || {
-            printer.run(rx.into_iter());
-        });
+        let printer_handle = thread::spawn(move || printer.run(rx.into_iter()));
 
         pool.install(|| {
             roots.par_iter().for_each(|root| {
@@ -529,14 +671,15 @@ impl SearchEngine {
         drop(tx);
         self.scanner.metrics.trigger_shutdown();
 
-        let _ = progress_handle.join();
-        let _ = printer_handle.join();
+        printer_handle
+            .join()
+            .map_err(|_| "Printer thread panicked".to_string())?;
 
-        SearchResult {
+        Ok(SearchResult {
             found: self.scanner.metrics.get_found(),
             scanned: self.scanner.metrics.get_scanned(),
             errors: self.scanner.metrics.get_errors(),
-        }
+        })
     }
 }
 
@@ -547,22 +690,16 @@ struct SearchResult {
 }
 
 impl SearchResult {
-    fn print_summary(&self, elapsed: f64, quiet: bool, hide_errors: bool) {
-        if quiet {
+    fn print_summary(&self, output_mode: &OutputMode, hide_errors: bool) {
+        if matches!(output_mode, OutputMode::Api) {
             return;
         }
 
-        let rate = self.scanned as f64 / elapsed;
-        eprint!(
-            "omega: {} found in {:.2}s ({:.0}/s)",
-            self.found, elapsed, rate
-        );
+        eprintln!("\n{} found | {} scanned", self.found, self.scanned);
 
         if !hide_errors && self.errors > 0 {
-            eprint!(" | {} errors", self.errors);
+            eprintln!("{} errors occurred", self.errors);
         }
-
-        eprintln!();
     }
 }
 
@@ -609,25 +746,29 @@ fn main() {
     let args = Args::parse();
 
     if args.files_only && args.dirs_only {
-        eprintln!("omega: error: cannot use --files-only and --dirs-only together");
+        eprintln!("error: cannot use --files-only and --dirs-only together");
         std::process::exit(1);
     }
 
     let roots = match RootPathProvider::get_search_roots(args.path.clone()) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("omega: error: {}", e);
+            eprintln!("error: {}", e);
             std::process::exit(1);
         }
     };
 
-    let quiet = args.quiet;
     let hide_errors = args.hide_errors;
+    let output_mode = OutputMode::from_args(&args);
     let engine = SearchEngine::new(&args);
 
-    let start = Instant::now();
-    let result = engine.search(roots);
-    let elapsed = start.elapsed().as_secs_f64();
+    let result = match engine.search(roots) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("fatal error: {}", e);
+            std::process::exit(1);
+        }
+    };
 
-    result.print_summary(elapsed, quiet, hide_errors);
+    result.print_summary(&output_mode, hide_errors);
 }
