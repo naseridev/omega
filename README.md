@@ -4,17 +4,17 @@ A blazing fast, cross-platform file search utility built with Rust. Omega levera
 
 ## Overview
 
-Omega is designed to search through file systems at scale, utilizing multi-threaded scanning and pattern matching capabilities. The application supports various search configurations including custom paths, depth limits, result limits, and multiple output modes.
+Omega is designed to search through file systems at scale, utilizing multi-threaded scanning and pattern matching capabilities. The application supports various search configurations including custom paths, depth limits, result limits, fuzzy search, and multiple output modes including API-compatible CSV format.
 
 ## Architecture
 
 The project follows a modular architecture with clear separation of concerns:
 
-- **Pattern Matching**: Handles search pattern processing and matching logic
+- **Pattern Matching**: Handles search pattern processing with support for exact and fuzzy matching using Levenshtein distance
 - **File System Scanner**: Manages directory traversal and file discovery
 - **Metrics Collection**: Tracks search progress, statistics, and errors
-- **Result Management**: Handles output formatting and result delivery
-- **Progress Reporting**: Provides real-time feedback during search operations
+- **Result Management**: Handles output formatting and result delivery in multiple formats
+- **File Information**: Comprehensive metadata extraction including permissions, timestamps, and file attributes
 - **Path Provider**: Manages search root configuration for system-wide or targeted searches
 
 ## Features
@@ -23,15 +23,21 @@ The project follows a modular architecture with clear separation of concerns:
 - Cross-platform support (Windows, Linux, macOS)
 - Custom path targeting with multiple path support
 - Case-sensitive and case-insensitive search modes
+- **Fuzzy search** with configurable Levenshtein distance threshold
 - File-only or directory-only filtering
 - Configurable search depth limitation
 - Result count and scan count limits
-- Real-time progress reporting
-- Multiple output modes: normal, quiet, and verbose
-- Symbolic link following support
-- Error tracking and reporting
+- Multiple output modes: normal and API (CSV format)
+- **Comprehensive file metadata** including:
+  - File size (bytes and human-readable)
+  - Modification timestamps (Unix timestamp and ISO 8601 format)
+  - File permissions (Unix-style format)
+  - File extension
+  - Hidden file detection
+  - File type (file/directory)
+- Error tracking with optional error display
 - Automatic thread pool optimization
-- Size formatting in verbose mode
+- Platform-specific hidden file detection
 
 ## Installation
 
@@ -43,7 +49,7 @@ The project follows a modular architecture with clear separation of concerns:
 ### Build from Source
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/naseridev/omega.git
 ```
 
 ```bash
@@ -75,7 +81,8 @@ omega [OPTIONS] <PATTERNS>...
 - `-p, --path <PATH>`: Search paths (can be used multiple times for multiple paths)
 - `-i, --case-insensitive`: Enable case-insensitive search (default: case-sensitive)
 - `-d, --max-depth <DEPTH>`: Maximum search depth in directory tree
-- `--follow-links`: Follow symbolic links during search
+- `-z, --fuzzy`: Enable fuzzy search using Levenshtein distance algorithm
+- `-T, --fuzzy-threshold <NUM>`: Set fuzzy search distance threshold (default: 2)
 
 #### Filtering
 
@@ -93,9 +100,8 @@ omega [OPTIONS] <PATTERNS>...
 
 #### Output
 
-- `-q, --quiet`: Quiet mode - only print file paths
-- `-v, --verbose`: Verbose mode - show detailed information including file sizes
-- `-e, --show-errors`: Display errors encountered during search
+- `--api`: API mode - outputs results in CSV format with comprehensive metadata
+- `-e, --hide-errors`: Hide error messages during search
 
 ### Examples
 
@@ -121,12 +127,28 @@ Search in multiple directories:
 omega config -p /etc -p /var -p /home
 ```
 
-#### Combined Short Options
+#### Fuzzy Search
 
-Case-insensitive quiet search with path:
+Find files with names similar to "readme" (tolerates typos):
 
 ```bash
-omega -qip /home document
+omega -z readme
+```
+
+Find files with custom fuzzy threshold:
+
+```bash
+omega -z -T 3 dokument
+```
+
+This will match "document", "documents", "dokument", etc.
+
+#### Combined Short Options
+
+Case-insensitive search with custom path:
+
+```bash
+omega -ip /home document
 ```
 
 #### Advanced Filtering
@@ -151,18 +173,28 @@ Custom thread count with scan limit:
 omega -t 8 -s 10000 report
 ```
 
-#### Verbose Output
+#### API Mode (CSV Output)
 
-Detailed information with file sizes:
+Get structured data with all metadata:
 
 ```bash
-omega -v config
+omega --api config
 ```
 
-Follow symbolic links with error reporting:
+Output includes: path, name, is_dir, is_file, size, size_human, modified, modified_human, is_hidden, extension, permissions
+
+#### Error Handling
+
+Show all errors encountered during search:
 
 ```bash
-omega --follow-links -e document
+omega config
+```
+
+Hide errors for cleaner output:
+
+```bash
+omega -e document
 ```
 
 #### Multiple Patterns
@@ -173,54 +205,124 @@ Search for multiple patterns simultaneously:
 omega readme license changelog
 ```
 
+Fuzzy search with multiple patterns:
+
+```bash
+omega -z readme lisence
+```
+
 ## Output Format
 
 ### Normal Mode
 
-Results are displayed with file type markers:
+Results are displayed as simple file paths:
 
 ```
-[F] /path/to/file.txt
-[D] /path/to/directory
+/path/to/config.txt
+/path/to/configuration
+/home/user/app.config
 ```
 
-Progress information is shown on stderr:
+Final summary on stderr:
 
 ```
-omega: 125 scanned | 15 found
+15 found | 1,234 scanned
 ```
 
-Final summary:
+If errors occurred and not hidden:
 
 ```
-omega: 15 found in 2.34s (53/s)
+15 found | 1,234 scanned
+3 errors occurred
 ```
 
-### Quiet Mode
+### API Mode (CSV Format)
 
-Only file paths are printed to stdout:
+Structured output with comprehensive metadata:
 
-```
-/path/to/file.txt
-/path/to/directory
-```
-
-No progress or summary information is displayed.
-
-### Verbose Mode
-
-Detailed information including file type and size:
-
-```
-[FILE]      1.25 MB /path/to/document.pdf
-[DIR ]     unknown /path/to/directory
+```csv
+path,name,is_dir,is_file,size,size_human,modified,modified_human,is_hidden,extension,permissions
+/etc/config.txt,config.txt,false,true,1024,1.00 KB,1699564800,2023-11-09T20:00:00Z,false,txt,rw-r--r--
+/home/user/.config,.config,true,false,0,0 B,1699651200,2023-11-10T20:00:00Z,true,,rwxr-xr-x
 ```
 
-Final summary with error count:
+Field descriptions:
+- `path`: Full path to the file/directory
+- `name`: File/directory name
+- `is_dir`: Boolean indicating if entry is a directory
+- `is_file`: Boolean indicating if entry is a file
+- `size`: Size in bytes (0 for directories)
+- `size_human`: Human-readable size (KB, MB, GB, TB)
+- `modified`: Unix timestamp of last modification
+- `modified_human`: ISO 8601 formatted timestamp
+- `is_hidden`: Boolean indicating if file/directory is hidden
+- `extension`: File extension (empty for directories)
+- `permissions`: Unix-style permissions (rwxrwxrwx format)
 
-```
-omega: 15 found in 2.34s (53/s) | 3 errors
-```
+No summary information is displayed in API mode (clean CSV output only).
+
+## Fuzzy Search Algorithm
+
+Omega uses the Levenshtein distance algorithm for fuzzy matching. This allows finding files even with typos or spelling variations.
+
+### How It Works
+
+- The algorithm calculates the minimum number of single-character edits needed to transform one string into another
+- Edits include: insertions, deletions, or substitutions
+- The fuzzy threshold (`-T`) specifies the maximum allowed distance
+
+### Examples
+
+With threshold 2 (`-T 2`), the pattern "dokument" matches:
+- "document" (distance: 1)
+- "documents" (distance: 2)
+- "dokument" (exact match)
+
+But not:
+- "documentation" (distance: 5)
+
+### Best Practices
+
+- Use lower thresholds (1-2) for precise matching
+- Use higher thresholds (3-4) for very flexible matching
+- Combine with case-insensitive mode (`-i`) for better results
+- Fuzzy search also performs exact substring matching for performance
+
+## File Metadata
+
+### Timestamps
+
+Modification times are provided in two formats:
+- **Unix timestamp**: Seconds since January 1, 1970 UTC
+- **ISO 8601 format**: `YYYY-MM-DDTHH:MM:SSZ` (human-readable)
+
+### Permissions
+
+Unix-style permission format (9 characters):
+- **rwx**: User permissions (read, write, execute)
+- **rwx**: Group permissions
+- **rwx**: Other permissions
+
+Examples:
+- `rwxr-xr-x`: Owner can read/write/execute, others can read/execute
+- `rw-r--r--`: Owner can read/write, others can only read
+- `rwxrwxrwx`: Full permissions for everyone
+
+On Windows, permissions are approximated based on readonly attribute.
+
+### Hidden Files
+
+Platform-specific detection:
+- **Unix/Linux/macOS**: Files starting with `.`
+- **Windows**: Files with the hidden attribute flag
+- **Other platforms**: Files starting with `.` (fallback)
+
+### Size Formatting
+
+File sizes are automatically formatted using appropriate units:
+- **Bytes (B)**: For sizes under 1 KB
+- **Kilobytes (KB)**, **Megabytes (MB)**, **Gigabytes (GB)**, **Terabytes (TB)**: As appropriate
+- Two decimal precision for formatted sizes (e.g., "1.25 MB")
 
 ## Performance Considerations
 
@@ -230,16 +332,21 @@ omega: 15 found in 2.34s (53/s) | 3 errors
 - Atomic operations ensure thread-safe metric collection with minimal overhead
 - Channel-based architecture decouples scanning from output operations
 - Multiple path searches are parallelized across thread pool
+- Fuzzy search includes exact substring matching optimization for better performance
 
 ## Platform-Specific Behavior
 
 ### Windows
 
-When no custom path is specified, searches all available drive letters (C: through Z:) that exist on the system.
+- When no custom path is specified, searches all available drive letters (C: through Z:)
+- Permissions shown as simplified read-write format
+- Hidden files detected via file attributes
 
 ### Unix-like Systems (Linux, macOS)
 
-When no custom path is specified, searches from the root directory (/).
+- When no custom path is specified, searches from the root directory (/)
+- Full Unix permission support (user/group/other)
+- Hidden files detected by name (starting with `.`)
 
 ### Custom Paths
 
@@ -250,8 +357,8 @@ When using `-p` or `--path`, the specified paths are validated before search beg
 - `clap`: Command-line argument parsing with version support
 - `rayon`: Data parallelism library for thread pool management
 - `crossbeam`: Concurrent programming primitives and channels
-- `walkdir`: Recursive directory traversal with symlink control
-- Standard Rust library for atomics, threading, and I/O
+- `walkdir`: Recursive directory traversal
+- Standard Rust library for atomics, threading, I/O, and file system operations
 
 ## Technical Details
 
@@ -273,19 +380,27 @@ The application properly manages system resources through:
 1. Root paths are determined based on custom paths or operating system defaults
 2. Path validation ensures all specified paths exist before search begins
 3. Directory traversal begins in parallel across all roots using thread pool
-4. Each entry is checked against the pattern matcher and type filters
-5. Matching results are sent through channels to the printer thread
-6. Progress is reported asynchronously on a separate thread
+4. Each entry is checked against the pattern matcher (exact or fuzzy)
+5. Entries are filtered based on type filters (files-only/dirs-only)
+6. Matching results have full metadata extracted and are sent through channels
 7. Search terminates when limits are reached or all paths are exhausted
 8. Final metrics including errors are collected and reported
 
-### Size Formatting
+### Fuzzy Matching Algorithm
 
-File sizes are automatically formatted using appropriate units:
+The Levenshtein distance implementation uses dynamic programming:
+- Time complexity: O(m × n) where m and n are pattern and target lengths
+- Space complexity: O(n) using row-wise optimization
+- Exact matches are checked first for performance
+- Word-based matching splits targets on non-alphanumeric characters
 
-- Bytes (B) for sizes under 1 KB
-- Kilobytes (KB), Megabytes (MB), Gigabytes (GB), Terabytes (TB) as appropriate
-- Two decimal precision for formatted sizes
+### CSV Output Format
+
+API mode produces RFC 4180 compliant CSV:
+- Fields containing commas, quotes, newlines, or tabs are quoted
+- Internal quotes are escaped by doubling (`""`)
+- UTF-8 encoding for all text data
+- Boolean values output as `true`/`false`
 
 ## Error Handling
 
@@ -293,15 +408,15 @@ The application handles common file system errors gracefully:
 
 - Inaccessible directories are skipped and counted as errors
 - Permission errors do not halt the search
-- Invalid symbolic links are ignored unless `--follow-links` is enabled
-- Failed path conversions are filtered out
+- Invalid paths are filtered out
 - Non-existent custom paths trigger immediate error and exit
 - Conflicting options (files-only + dirs-only) are validated at startup
+- Metadata extraction failures are handled per-file
 
 ## Exit Codes
 
 - `0`: Successful execution
-- `1`: Error occurred (invalid path, conflicting options, no valid search paths)
+- `1`: Error occurred (invalid path, conflicting options, no valid search paths, thread pool creation failure)
 
 ## Use Cases
 
@@ -313,6 +428,12 @@ Find configuration files across the system:
 omega -p /etc -p /usr/local/etc config
 ```
 
+Get detailed metadata about log files:
+
+```bash
+omega --api -p /var/log log
+```
+
 ### Development
 
 Locate source files in project directories:
@@ -321,20 +442,40 @@ Locate source files in project directories:
 omega -f -p ./src -p ./lib -i .rs
 ```
 
-### Log Analysis
-
-Find recent log files with size information:
+Find files with fuzzy name matching:
 
 ```bash
-omega -v -p /var/log log
+omega -z -p ./project dokument
 ```
 
-### Cleanup Operations
+### Data Analysis
 
-Identify large directories for cleanup:
+Export file system metadata to CSV for analysis:
 
 ```bash
-omega -D -v cache temp
+omega --api -p /data backup > backup_files.csv
+```
+
+### File Management
+
+Find large files for cleanup:
+
+```bash
+omega --api -f -p /home cache | sort -t, -k5 -n
+```
+
+Find hidden configuration files:
+
+```bash
+omega -i -p ~ .config
+```
+
+### Content Search
+
+Case-insensitive fuzzy search across multiple directories:
+
+```bash
+omega -iz -p /documents -p /downloads report
 ```
 
 ## Performance Benchmarks
@@ -345,6 +486,7 @@ Omega is designed for speed. Typical performance characteristics:
 - Scales linearly with CPU core count
 - Minimal memory footprint through streaming architecture
 - Efficient pattern matching with early termination
+- Fuzzy search optimized with exact substring checking
 
 ## Contributing
 
@@ -357,3 +499,12 @@ Contributions are welcome. Please ensure code follows Rust best practices and in
 - Update documentation for user-facing changes
 - Ensure all tests pass before submitting
 - Use `cargo fmt` and `cargo clippy` for code quality
+- Consider performance implications of changes
+
+## Author
+
+Nima Naseri
+
+## Version
+
+Current version: Check `Cargo.toml` or run `omega --version`
