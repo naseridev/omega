@@ -59,6 +59,17 @@ struct Args {
 
     #[arg(short = 'e', long, help = "Show errors")]
     show_errors: bool,
+
+    #[arg(short = 'z', long, help = "Fuzzy search using Levenshtein distance")]
+    fuzzy: bool,
+
+    #[arg(
+        short = 'T',
+        long,
+        default_value = "2",
+        help = "Fuzzy search distance threshold"
+    )]
+    threshold: usize,
 }
 
 enum OutputMode {
@@ -205,9 +216,41 @@ impl SearchLimits {
     }
 }
 
+fn levenshtein_distance(s1: &str, s2: &str) -> usize {
+    let len1 = s1.chars().count();
+    let len2 = s2.chars().count();
+
+    if len1 == 0 {
+        return len2;
+    }
+    if len2 == 0 {
+        return len1;
+    }
+
+    let mut prev_row: Vec<usize> = (0..=len2).collect();
+    let mut curr_row = vec![0; len2 + 1];
+
+    for (i, c1) in s1.chars().enumerate() {
+        curr_row[0] = i + 1;
+
+        for (j, c2) in s2.chars().enumerate() {
+            let cost = if c1 == c2 { 0 } else { 1 };
+            curr_row[j + 1] = (curr_row[j] + 1)
+                .min(prev_row[j + 1] + 1)
+                .min(prev_row[j] + cost);
+        }
+
+        std::mem::swap(&mut prev_row, &mut curr_row);
+    }
+
+    prev_row[len2]
+}
+
 struct PatternMatcher {
     patterns: Vec<String>,
     case_sensitive: bool,
+    fuzzy: bool,
+    threshold: usize,
 }
 
 impl PatternMatcher {
@@ -222,6 +265,8 @@ impl PatternMatcher {
         Self {
             patterns,
             case_sensitive,
+            fuzzy: args.fuzzy,
+            threshold: args.threshold,
         }
     }
 
@@ -232,7 +277,25 @@ impl PatternMatcher {
             name.to_lowercase()
         };
 
-        self.patterns.iter().any(|p| target.contains(p))
+        if self.fuzzy {
+            self.patterns.iter().any(|p| {
+                let exact_match = target.contains(p);
+                if exact_match {
+                    return true;
+                }
+
+                let words: Vec<&str> = target.split(|c: char| !c.is_alphanumeric()).collect();
+                words.iter().any(|word| {
+                    if word.len() > 0 {
+                        levenshtein_distance(p, word) <= self.threshold
+                    } else {
+                        false
+                    }
+                })
+            })
+        } else {
+            self.patterns.iter().any(|p| target.contains(p))
+        }
     }
 }
 
