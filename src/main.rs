@@ -54,22 +54,19 @@ struct Args {
     #[arg(short = 'v', long, help = "Verbose output")]
     verbose: bool,
 
-    #[arg(long, help = "Follow symbolic links")]
-    follow_links: bool,
-
-    #[arg(short = 'e', long, help = "Show errors")]
-    show_errors: bool,
+    #[arg(short = 'e', long, help = "Hide errors")]
+    hide_errors: bool,
 
     #[arg(short = 'z', long, help = "Fuzzy search using Levenshtein distance")]
     fuzzy: bool,
 
     #[arg(
         short = 'T',
-        long,
+        long = "fuzzy-threshold",
         default_value = "2",
         help = "Fuzzy search distance threshold"
     )]
-    threshold: usize,
+    fuzzy_threshold: usize,
 }
 
 enum OutputMode {
@@ -266,7 +263,7 @@ impl PatternMatcher {
             patterns,
             case_sensitive,
             fuzzy: args.fuzzy,
-            threshold: args.threshold,
+            threshold: args.fuzzy_threshold,
         }
     }
 
@@ -304,8 +301,7 @@ struct SearchConfig {
     max_depth: Option<usize>,
     files_only: bool,
     dirs_only: bool,
-    follow_links: bool,
-    show_errors: bool,
+    hide_errors: bool,
 }
 
 impl SearchConfig {
@@ -321,8 +317,7 @@ impl SearchConfig {
             max_depth: args.max_depth,
             files_only: args.files_only,
             dirs_only: args.dirs_only,
-            follow_links: args.follow_links,
-            show_errors: args.show_errors,
+            hide_errors: args.hide_errors,
         }
     }
 
@@ -360,7 +355,7 @@ impl FileSystemScanner {
     }
 
     fn scan_directory(&self, root: &Path, tx: Sender<(PathBuf, bool)>) {
-        let mut walker = WalkDir::new(root).follow_links(self.config.follow_links);
+        let mut walker = WalkDir::new(root);
 
         if let Some(depth) = self.config.max_depth {
             walker = walker.max_depth(depth);
@@ -375,7 +370,7 @@ impl FileSystemScanner {
                 Ok(e) => e,
                 Err(e) => {
                     self.metrics.increment_errors();
-                    if self.config.show_errors {
+                    if !self.config.hide_errors {
                         eprintln!("omega: error: {}", e);
                     }
                     continue;
@@ -552,7 +547,7 @@ struct SearchResult {
 }
 
 impl SearchResult {
-    fn print_summary(&self, elapsed: f64, quiet: bool, show_errors: bool) {
+    fn print_summary(&self, elapsed: f64, quiet: bool, hide_errors: bool) {
         if quiet {
             return;
         }
@@ -563,7 +558,7 @@ impl SearchResult {
             self.found, elapsed, rate
         );
 
-        if show_errors && self.errors > 0 {
+        if !hide_errors && self.errors > 0 {
             eprint!(" | {} errors", self.errors);
         }
 
@@ -627,12 +622,12 @@ fn main() {
     };
 
     let quiet = args.quiet;
-    let show_errors = args.show_errors;
+    let hide_errors = args.hide_errors;
     let engine = SearchEngine::new(&args);
 
     let start = Instant::now();
     let result = engine.search(roots);
     let elapsed = start.elapsed().as_secs_f64();
 
-    result.print_summary(elapsed, quiet, show_errors);
+    result.print_summary(elapsed, quiet, hide_errors);
 }
