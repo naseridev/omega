@@ -1,6 +1,6 @@
 # Omega File Search
 
-A blazing fast, cross-platform file search utility built with Rust. Omega leverages parallel processing and efficient directory traversal to provide rapid file system searches with advanced filtering capabilities.
+A fast cross-platform file search utility written in rust. Omega leverages parallel processing and efficient directory traversal to provide rapid file system searches with advanced filtering capabilities.
 
 ## Overview
 
