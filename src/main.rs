@@ -458,32 +458,30 @@ impl PatternMatcher {
     }
 
     fn matches(&self, name: &str) -> bool {
-        let target = if self.case_sensitive {
-            name
-        } else {
-            &name.to_lowercase()
-        };
-
-        if self.fuzzy {
-            for p in &self.patterns {
-                if target.contains(p.as_str()) {
-                    return true;
-                }
-            }
-
-            let words: Vec<&str> = target.split(|c: char| !c.is_alphanumeric()).collect();
-
-            for p in &self.patterns {
-                for word in &words {
-                    if !word.is_empty() && levenshtein_distance(p, word) <= self.threshold {
-                        return true;
-                    }
-                }
-            }
-            false
-        } else {
-            self.patterns.iter().any(|p| target.contains(p.as_str()))
+        if !self.fuzzy {
+            return if self.case_sensitive {
+                self.patterns.iter().any(|p| name.contains(p.as_str()))
+            } else {
+                let target = name.to_lowercase();
+                self.patterns.iter().any(|p| target.contains(p.as_str()))
+            };
         }
+
+        let target = if self.case_sensitive {
+            name.to_string()
+        } else {
+            name.to_lowercase()
+        };
+        if self.patterns.iter().any(|p| target.contains(p.as_str())) {
+            return true;
+        }
+
+        let words: Vec<&str> = target.split(|c: char| !c.is_alphanumeric()).collect();
+        self.patterns.iter().any(|p| {
+            words
+                .iter()
+                .any(|word| !word.is_empty() && levenshtein_distance(p, word) <= self.threshold)
+        })
     }
 }
 
