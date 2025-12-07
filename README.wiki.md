@@ -44,19 +44,19 @@ Omega is a high-performance file search utility designed to efficiently search l
 Omega follows a modular architecture with clear separation of concerns:
 
 ```
-┌─────────────┐
-│    CLI      │ Parse arguments
-└──────┬──────┘
-       │
-┌──────▼──────┐
-│   Engine    │ Orchestrate search
-└──────┬──────┘
-       │
-   ┌───┴───┬────────┬──────────┐
-   │       │        │          │
-┌──▼───┐ ┌▼─────┐ ┌▼──────┐ ┌─▼──────┐
-│Scanner│ │Matcher│ │Metrics│ │Printer │
-└───────┘ └──────┘ └───────┘ └────────┘
+System Design:
+
+CLI Layer
+  - Parse arguments
+  |
+  v
+Engine Layer
+  - Orchestrate search
+  |
+  +-- Scanner (Filesystem traversal)
+  +-- Matcher (Pattern matching)
+  +-- Metrics (Statistics tracking)
+  +-- Printer (Result output)
 ```
 
 ### Threading Model
@@ -72,17 +72,14 @@ Omega uses a producer-consumer pattern:
 ### Data Flow
 
 ```
-Input Args
-    ↓
-Search Roots Determination
-    ↓
-Parallel Directory Traversal
-    ↓
-Pattern Matching + Filtering
-    ↓
-Channel Communication
-    ↓
-Result Output + Metrics
+Data Flow:
+
+1. Input Args
+2. Search Roots Determination
+3. Parallel Directory Traversal
+4. Pattern Matching + Filtering
+5. Channel Communication
+6. Result Output + Metrics
 ```
 
 ## Core Components
@@ -424,21 +421,23 @@ cargo doc --open
 ### Project Structure
 
 ```
+Project Structure:
+
 omega/
-├── src/
-│   ├── main.rs          # Entry point
-│   ├── lib.rs           # Library root
-│   ├── cli.rs           # Argument parsing
-│   ├── engine.rs        # Search orchestration
-│   ├── scanner.rs       # Filesystem traversal
-│   ├── matcher.rs       # Pattern matching
-│   ├── metrics.rs       # Statistics tracking
-│   ├── output.rs        # Result formatting
-│   ├── file_info.rs     # File metadata
-│   ├── paths.rs         # Root path logic
-│   └── utils.rs         # Utility functions
-├── Cargo.toml           # Dependencies
-└── README.md            # User guide
+  - src/
+    - main.rs          (Entry point)
+    - lib.rs           (Library root)
+    - cli.rs           (Argument parsing)
+    - engine.rs        (Search orchestration)
+    - scanner.rs       (Filesystem traversal)
+    - matcher.rs       (Pattern matching)
+    - metrics.rs       (Statistics tracking)
+    - output.rs        (Result formatting)
+    - file_info.rs     (File metadata)
+    - paths.rs         (Root path logic)
+    - utils.rs         (Utility functions)
+  - Cargo.toml         (Dependencies)
+  - README.md          (User guide)
 ```
 
 ### Dependencies
