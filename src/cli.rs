@@ -6,7 +6,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Parser)]
 #[command(name = "omega")]
 #[command(version = VERSION)]
-#[command(about = "Blazing fast cross-platform file search", long_about = None)]
+#[command(about = "A fast cross-platform file search utility written in rust", long_about = None)]
 #[command(author = "Nima Naseri")]
 pub struct Args {
     #[arg(required = true, help = "Search patterns")]
