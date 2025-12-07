@@ -233,19 +233,13 @@ fn format_permissions(_metadata: &std::fs::Metadata) -> String {
 
 fn format_timestamp(timestamp: u64) -> String {
     const SECONDS_PER_DAY: u64 = 86400;
-    const SECONDS_PER_HOUR: u64 = 3600;
-    const SECONDS_PER_MINUTE: u64 = 60;
 
-    let mut remaining = timestamp;
+    let days = timestamp / SECONDS_PER_DAY;
+    let remaining = timestamp % SECONDS_PER_DAY;
 
-    let days = remaining / SECONDS_PER_DAY;
-    remaining %= SECONDS_PER_DAY;
-
-    let hours = remaining / SECONDS_PER_HOUR;
-    remaining %= SECONDS_PER_HOUR;
-
-    let minutes = remaining / SECONDS_PER_MINUTE;
-    let seconds = remaining % SECONDS_PER_MINUTE;
+    let hours = remaining / 3600;
+    let minutes = (remaining % 3600) / 60;
+    let seconds = remaining % 60;
 
     let (year, month, day) = days_to_date(days);
 
@@ -465,29 +459,30 @@ impl PatternMatcher {
 
     fn matches(&self, name: &str) -> bool {
         let target = if self.case_sensitive {
-            name.to_string()
+            name
         } else {
-            name.to_lowercase()
+            &name.to_lowercase()
         };
 
         if self.fuzzy {
-            self.patterns.iter().any(|p| {
-                let exact_match = target.contains(p);
-                if exact_match {
+            for p in &self.patterns {
+                if target.contains(p.as_str()) {
                     return true;
                 }
+            }
 
-                let words: Vec<&str> = target.split(|c: char| !c.is_alphanumeric()).collect();
-                words.iter().any(|word| {
-                    if !word.is_empty() {
-                        levenshtein_distance(p, word) <= self.threshold
-                    } else {
-                        false
+            let words: Vec<&str> = target.split(|c: char| !c.is_alphanumeric()).collect();
+
+            for p in &self.patterns {
+                for word in &words {
+                    if !word.is_empty() && levenshtein_distance(p, word) <= self.threshold {
+                        return true;
                     }
-                })
-            })
+                }
+            }
+            false
         } else {
-            self.patterns.iter().any(|p| target.contains(p))
+            self.patterns.iter().any(|p| target.contains(p.as_str()))
         }
     }
 }
