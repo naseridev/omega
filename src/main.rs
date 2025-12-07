@@ -1,8 +1,11 @@
 use clap::Parser;
 use crossbeam::channel::{Sender, unbounded};
 use rayon::prelude::*;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::UNIX_EPOCH;
@@ -63,6 +66,16 @@ struct Args {
 
     #[arg(long, help = "API mode - output as CSV format")]
     api: bool,
+
+    #[arg(short = 'c', long, help = "Search inside file contents")]
+    content_search: bool,
+
+    #[arg(
+        long,
+        default_value = "10485760",
+        help = "Maximum file size for content search (bytes, default 10MB)"
+    )]
+    max_content_size: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +325,7 @@ struct SearchMetrics {
     scanned: Arc<AtomicU64>,
     errors: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
+    log_file: Arc<Mutex<Option<std::fs::File>>>,
 }
 
 impl SearchMetrics {
@@ -321,6 +335,7 @@ impl SearchMetrics {
             scanned: Arc::new(AtomicU64::new(0)),
             errors: Arc::new(AtomicU64::new(0)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            log_file: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -334,6 +349,37 @@ impl SearchMetrics {
 
     fn increment_errors(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn log_error(&self, error: &str) {
+        if error.contains("Access is denied") {
+            return;
+        }
+
+        self.increment_errors();
+
+        let mut guard = match self.log_file.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        if guard.is_none() {
+            *guard = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("omega.log")
+                .ok();
+        }
+
+        if let Some(file) = guard.as_mut() {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let formatted_time = format_timestamp(timestamp);
+            let _ = writeln!(file, "[{}] {}", formatted_time, error);
+            let _ = file.flush();
+        }
     }
 
     fn get_found(&self) -> u64 {
@@ -409,11 +455,11 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     let mut prev_row: Vec<usize> = (0..=len2).collect();
     let mut curr_row = vec![0; len2 + 1];
 
-    for i in 0..len1 {
+    for (i, &ch1) in s1_chars.iter().enumerate() {
         curr_row[0] = i + 1;
 
         for j in 0..len2 {
-            let cost = if s1_chars[i] == s2_chars[j] { 0 } else { 1 };
+            let cost = if ch1 == s2_chars[j] { 0 } else { 1 };
             curr_row[j + 1] = (curr_row[j] + 1)
                 .min(prev_row[j + 1] + 1)
                 .min(prev_row[j] + cost);
@@ -430,6 +476,8 @@ struct PatternMatcher {
     case_sensitive: bool,
     fuzzy: bool,
     threshold: usize,
+    content_search: bool,
+    max_content_size: u64,
 }
 
 impl PatternMatcher {
@@ -446,6 +494,8 @@ impl PatternMatcher {
             case_sensitive,
             fuzzy: args.fuzzy,
             threshold: args.fuzzy_threshold,
+            content_search: args.content_search,
+            max_content_size: args.max_content_size,
         }
     }
 
@@ -474,6 +524,38 @@ impl PatternMatcher {
                 .iter()
                 .any(|word| !word.is_empty() && levenshtein_distance(p, word) <= self.threshold)
         })
+    }
+
+    fn matches_content(&self, path: &Path, size: u64) -> bool {
+        if !self.content_search || size > self.max_content_size || size == 0 {
+            return false;
+        }
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let target = if self.case_sensitive {
+            content
+        } else {
+            content.to_lowercase()
+        };
+
+        if self.fuzzy {
+            if self.patterns.iter().any(|p| target.contains(p.as_str())) {
+                return true;
+            }
+
+            let words: Vec<&str> = target.split(|c: char| !c.is_alphanumeric()).collect();
+            self.patterns.iter().any(|p| {
+                words
+                    .iter()
+                    .any(|word| !word.is_empty() && levenshtein_distance(p, word) <= self.threshold)
+            })
+        } else {
+            self.patterns.iter().any(|p| target.contains(p.as_str()))
+        }
     }
 }
 
@@ -554,8 +636,9 @@ impl FileSystemScanner {
 
             let entry = match entry_result {
                 Ok(e) => e,
-                Err(_) => {
-                    self.metrics.increment_errors();
+                Err(e) => {
+                    self.metrics
+                        .log_error(&format!("Failed to read entry: {}", e));
                     continue;
                 }
             };
@@ -570,7 +653,15 @@ impl FileSystemScanner {
             }
 
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if self.matcher.matches(name) {
+                let name_matches = self.matcher.matches(name);
+                let content_matches = if !name_matches && !is_dir {
+                    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    self.matcher.matches_content(path, size)
+                } else {
+                    false
+                };
+
+                if name_matches || content_matches {
                     self.metrics.increment_found();
 
                     if let Ok(file_info) = FileInfo::from_path(path) {
