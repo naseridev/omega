@@ -192,28 +192,18 @@ fn format_permissions(metadata: &std::fs::Metadata) -> String {
     use std::os::unix::fs::PermissionsExt;
     let mode = metadata.permissions().mode();
 
-    let user = format!(
-        "{}{}{}",
+    format!(
+        "{}{}{}{}{}{}{}{}{}",
         if mode & 0o400 != 0 { "r" } else { "-" },
         if mode & 0o200 != 0 { "w" } else { "-" },
-        if mode & 0o100 != 0 { "x" } else { "-" }
-    );
-
-    let group = format!(
-        "{}{}{}",
+        if mode & 0o100 != 0 { "x" } else { "-" },
         if mode & 0o040 != 0 { "r" } else { "-" },
         if mode & 0o020 != 0 { "w" } else { "-" },
-        if mode & 0o010 != 0 { "x" } else { "-" }
-    );
-
-    let other = format!(
-        "{}{}{}",
+        if mode & 0o010 != 0 { "x" } else { "-" },
         if mode & 0o004 != 0 { "r" } else { "-" },
         if mode & 0o002 != 0 { "w" } else { "-" },
         if mode & 0o001 != 0 { "x" } else { "-" }
-    );
-
-    format!("{}{}{}", user, group, other)
+    )
 }
 
 #[cfg(windows)]
@@ -404,8 +394,10 @@ impl SearchLimits {
 }
 
 fn levenshtein_distance(s1: &str, s2: &str) -> usize {
-    let len1 = s1.chars().count();
-    let len2 = s2.chars().count();
+    let s1_chars: Vec<char> = s1.chars().collect();
+    let s2_chars: Vec<char> = s2.chars().collect();
+    let len1 = s1_chars.len();
+    let len2 = s2_chars.len();
 
     if len1 == 0 {
         return len2;
@@ -417,11 +409,11 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
     let mut prev_row: Vec<usize> = (0..=len2).collect();
     let mut curr_row = vec![0; len2 + 1];
 
-    for (i, c1) in s1.chars().enumerate() {
+    for i in 0..len1 {
         curr_row[0] = i + 1;
 
-        for (j, c2) in s2.chars().enumerate() {
-            let cost = if c1 == c2 { 0 } else { 1 };
+        for j in 0..len2 {
+            let cost = if s1_chars[i] == s2_chars[j] { 0 } else { 1 };
             curr_row[j + 1] = (curr_row[j] + 1)
                 .min(prev_row[j + 1] + 1)
                 .min(prev_row[j] + cost);
