@@ -1,145 +1,156 @@
+use std::borrow::Cow;
+use std::fs::Metadata;
+use std::io::Write;
 use std::path::Path;
 
-pub fn escape_csv(s: &str) -> String {
-    if s.contains(',')
-        || s.contains('"')
-        || s.contains('\n')
-        || s.contains('\r')
-        || s.contains('\t')
-    {
-        format!("\"{}\"", s.replace("\"", "\"\""))
-    } else {
-        s.to_string()
+const SECONDS_PER_DAY: u64 = 86_400;
+const SIZE_UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+
+#[cfg(unix)]
+pub fn path_bytes(path: &Path) -> Cow<'_, [u8]> {
+    use std::os::unix::ffi::OsStrExt;
+    Cow::Borrowed(path.as_os_str().as_bytes())
+}
+
+#[cfg(not(unix))]
+pub fn path_bytes(path: &Path) -> Cow<'_, [u8]> {
+    match path.to_string_lossy() {
+        Cow::Borrowed(s) => Cow::Borrowed(s.as_bytes()),
+        Cow::Owned(s) => Cow::Owned(s.into_bytes()),
     }
 }
 
-pub fn format_size(bytes: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    let mut size = bytes as f64;
-    let mut unit_idx = 0;
+pub fn write_csv_field(out: &mut Vec<u8>, field: &[u8]) {
+    let quoted = field
+        .iter()
+        .any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r' | b'\t'));
 
-    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit_idx += 1;
+    if !quoted {
+        out.extend_from_slice(field);
+        return;
     }
 
-    if unit_idx == 0 {
-        format!("{} {}", bytes, UNITS[0])
-    } else {
-        format!("{:.2} {}", size, UNITS[unit_idx])
-    }
-}
-
-pub fn format_timestamp(timestamp: u64) -> String {
-    const SECONDS_PER_DAY: u64 = 86400;
-
-    let days = timestamp / SECONDS_PER_DAY;
-    let remaining = timestamp % SECONDS_PER_DAY;
-
-    let hours = remaining / 3600;
-    let minutes = (remaining % 3600) / 60;
-    let seconds = remaining % 60;
-
-    let (year, month, day) = days_to_date(days);
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-fn days_to_date(days_since_epoch: u64) -> (u32, u32, u32) {
-    let mut year = 1970u32;
-    let mut remaining_days = days_since_epoch;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-
-        if remaining_days < days_in_year as u64 {
-            break;
+    out.push(b'"');
+    for &byte in field {
+        if byte == b'"' {
+            out.push(b'"');
         }
+        out.push(byte);
+    }
+    out.push(b'"');
+}
 
-        remaining_days -= days_in_year as u64;
-        year += 1;
+pub fn write_size(out: &mut Vec<u8>, bytes: u64) {
+    let mut size = bytes as f64;
+    let mut unit = 0;
+
+    while size >= 1024.0 && unit < SIZE_UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
     }
 
-    let days_in_months = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    let _ = if unit == 0 {
+        write!(out, "{} {}", bytes, SIZE_UNITS[0])
     } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        write!(out, "{:.2} {}", size, SIZE_UNITS[unit])
+    };
+}
+
+pub fn write_timestamp(out: &mut Vec<u8>, timestamp: u64) {
+    let remaining = timestamp % SECONDS_PER_DAY;
+    let (year, month, day) = civil_from_days(timestamp / SECONDS_PER_DAY);
+
+    let _ = write!(
+        out,
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        month,
+        day,
+        remaining / 3600,
+        (remaining % 3600) / 60,
+        remaining % 60
+    );
+}
+
+fn civil_from_days(days_since_epoch: u64) -> (u64, u64, u64) {
+    let shifted = days_since_epoch + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_position = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_position + 2) / 5 + 1;
+    let month = if month_position < 10 {
+        month_position + 3
+    } else {
+        month_position - 9
     };
 
-    let mut month = 1u32;
-    for &days_in_month in &days_in_months {
-        if remaining_days < days_in_month as u64 {
-            break;
-        }
-        remaining_days -= days_in_month as u64;
-        month += 1;
-    }
-
-    let day = (remaining_days + 1) as u32;
-
-    (year, month, day)
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
-pub fn is_hidden_file(path: &Path, _name: &str) -> bool {
-    #[cfg(unix)]
-    {
-        _name.starts_with('.')
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-            (metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
-        } else {
-            false
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        _name.starts_with('.')
-    }
+pub fn modified_seconds(metadata: &Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 #[cfg(unix)]
-pub fn format_permissions(metadata: &std::fs::Metadata) -> String {
+pub fn write_permissions(out: &mut Vec<u8>, metadata: &Metadata) {
     use std::os::unix::fs::PermissionsExt;
-    let mode = metadata.permissions().mode();
 
-    format!(
-        "{}{}{}{}{}{}{}{}{}",
-        if mode & 0o400 != 0 { "r" } else { "-" },
-        if mode & 0o200 != 0 { "w" } else { "-" },
-        if mode & 0o100 != 0 { "x" } else { "-" },
-        if mode & 0o040 != 0 { "r" } else { "-" },
-        if mode & 0o020 != 0 { "w" } else { "-" },
-        if mode & 0o010 != 0 { "x" } else { "-" },
-        if mode & 0o004 != 0 { "r" } else { "-" },
-        if mode & 0o002 != 0 { "w" } else { "-" },
-        if mode & 0o001 != 0 { "x" } else { "-" }
-    )
+    const FLAGS: [(u32, u8); 9] = [
+        (0o400, b'r'),
+        (0o200, b'w'),
+        (0o100, b'x'),
+        (0o040, b'r'),
+        (0o020, b'w'),
+        (0o010, b'x'),
+        (0o004, b'r'),
+        (0o002, b'w'),
+        (0o001, b'x'),
+    ];
+
+    let mode = metadata.permissions().mode();
+    let mut rendered = [b'-'; 9];
+
+    for (slot, (bit, symbol)) in rendered.iter_mut().zip(FLAGS) {
+        if mode & bit != 0 {
+            *slot = symbol;
+        }
+    }
+
+    out.extend_from_slice(&rendered);
 }
 
 #[cfg(windows)]
-pub fn format_permissions(metadata: &std::fs::Metadata) -> String {
-    let readonly = metadata.permissions().readonly();
-    if readonly {
-        "r--r--r--".to_string()
+pub fn write_permissions(out: &mut Vec<u8>, metadata: &Metadata) {
+    let rendered: &[u8] = if metadata.permissions().readonly() {
+        b"r--r--r--"
     } else {
-        "rw-rw-rw-".to_string()
-    }
+        b"rw-rw-rw-"
+    };
+    out.extend_from_slice(rendered);
 }
 
 #[cfg(not(any(unix, windows)))]
-pub fn format_permissions(_metadata: &std::fs::Metadata) -> String {
-    "rwxrwxrwx".to_string()
+pub fn write_permissions(out: &mut Vec<u8>, _metadata: &Metadata) {
+    out.extend_from_slice(b"rwxrwxrwx");
+}
+
+#[cfg(windows)]
+pub fn is_hidden(_name: &str, metadata: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+#[cfg(not(windows))]
+pub fn is_hidden(name: &str, _metadata: &Metadata) -> bool {
+    name.as_bytes().first() == Some(&b'.')
 }

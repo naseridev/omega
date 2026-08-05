@@ -4,21 +4,23 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+] }
 rayon = "1.10"
-crossbeam = "0.8"
-walkdir = "2.5"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tui = "0.19.0"
-crossterm = "0.29.0"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+debug = false
+incremental = false
 
 [profile.dev]
 opt-level = 0

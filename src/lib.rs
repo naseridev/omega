@@ -1,6 +1,5 @@
 pub mod cli;
 pub mod engine;
-pub mod file_info;
 pub mod matcher;
 pub mod metrics;
 pub mod output;

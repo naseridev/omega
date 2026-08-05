@@ -3,65 +3,57 @@ use crate::matcher::PatternMatcher;
 use crate::metrics::{SearchLimits, SearchMetrics};
 use crate::output::{OutputMode, ResultPrinter, SearchResult};
 use crate::scanner::{FileSystemScanner, SearchConfig};
-use crossbeam::channel::unbounded;
-use rayon::prelude::*;
 use std::path::PathBuf;
-use std::thread;
+use std::sync::mpsc::sync_channel;
+
+const CHANNEL_DEPTH_PER_THREAD: usize = 4;
 
 pub struct SearchEngine {
     scanner: FileSystemScanner,
-    config: SearchConfig,
     output_mode: OutputMode,
 }
 
 impl SearchEngine {
     pub fn new(args: &Args) -> Self {
-        let matcher = PatternMatcher::from_args(args);
-        let limits = SearchLimits::from_args(args);
-        let metrics = SearchMetrics::new();
-        let config = SearchConfig::from_args(args);
         let output_mode = OutputMode::from_args(args);
 
-        let scanner_config = SearchConfig::from_args(args);
-        let scanner = FileSystemScanner::new(matcher, limits, metrics, scanner_config);
+        let scanner = FileSystemScanner::new(
+            PatternMatcher::from_args(args),
+            SearchLimits::from_args(args),
+            SearchMetrics::new(),
+            SearchConfig::from_args(args),
+            output_mode,
+        );
 
         Self {
             scanner,
-            config,
             output_mode,
         }
     }
 
-    pub fn search(&self, roots: Vec<PathBuf>) -> Result<SearchResult, String> {
+    pub fn search(&self, roots: &[PathBuf]) -> Result<SearchResult, String> {
+        let threads = self.scanner.config.threads;
+
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.config.threads)
+            .num_threads(threads)
             .build()
-            .map_err(|e| format!("Failed to create thread pool: {}", e))?;
+            .map_err(|error| format!("Failed to create thread pool: {error}"))?;
 
-        let (tx, rx) = unbounded();
+        let (sender, receiver) = sync_channel(threads * CHANNEL_DEPTH_PER_THREAD);
         let printer = ResultPrinter::new(self.output_mode);
-        let printer_handle = thread::spawn(move || printer.run(rx.into_iter()));
+        let metrics = &self.scanner.metrics;
 
-        pool.install(|| {
-            roots.par_iter().for_each(|root| {
-                if !self.scanner.limits.should_continue(&self.scanner.metrics) {
-                    return;
-                }
-                self.scanner.scan_directory(root, tx.clone());
-            });
+        std::thread::scope(|scope| {
+            scope.spawn(move || printer.run(receiver, metrics));
+            pool.install(|| self.scanner.run(roots, sender));
         });
 
-        drop(tx);
-        self.scanner.metrics.trigger_shutdown();
-
-        printer_handle
-            .join()
-            .map_err(|_| "Printer thread panicked".to_string())?;
+        metrics.trigger_shutdown();
 
         Ok(SearchResult::new(
-            self.scanner.metrics.get_found(),
-            self.scanner.metrics.get_scanned(),
-            self.scanner.metrics.get_errors(),
+            metrics.get_found(),
+            metrics.get_scanned(),
+            metrics.get_errors(),
             self.output_mode,
         ))
     }

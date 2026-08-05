@@ -1,17 +1,21 @@
 use crate::cli::Args;
-use crate::utils::format_timestamp;
-use std::fs::OpenOptions;
-use std::io::Write;
+use crate::utils::{path_bytes, write_timestamp};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Write};
+use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[repr(align(64))]
+struct Padded<T>(T);
 
 pub struct SearchMetrics {
-    found: Arc<AtomicU64>,
-    scanned: Arc<AtomicU64>,
-    errors: Arc<AtomicU64>,
-    shutdown: Arc<AtomicBool>,
-    log_file: Arc<Mutex<Option<std::fs::File>>>,
+    found: Padded<AtomicU64>,
+    scanned: Padded<AtomicU64>,
+    errors: Padded<AtomicU64>,
+    shutdown: Padded<AtomicBool>,
+    log: Mutex<Option<File>>,
 }
 
 impl Default for SearchMetrics {
@@ -23,36 +27,45 @@ impl Default for SearchMetrics {
 impl SearchMetrics {
     pub fn new() -> Self {
         Self {
-            found: Arc::new(AtomicU64::new(0)),
-            scanned: Arc::new(AtomicU64::new(0)),
-            errors: Arc::new(AtomicU64::new(0)),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            log_file: Arc::new(Mutex::new(None)),
+            found: Padded(AtomicU64::new(0)),
+            scanned: Padded(AtomicU64::new(0)),
+            errors: Padded(AtomicU64::new(0)),
+            shutdown: Padded(AtomicBool::new(false)),
+            log: Mutex::new(None),
         }
     }
 
+    #[inline]
     pub fn increment_found(&self) {
-        self.found.fetch_add(1, Ordering::Relaxed);
+        self.found.0.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn increment_scanned(&self) {
-        self.scanned.fetch_add(1, Ordering::Relaxed);
+    #[inline]
+    pub fn claim_found(&self, limit: u64) -> bool {
+        self.found
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |found| {
+                (found < limit).then_some(found + 1)
+            })
+            .is_ok()
     }
 
-    pub fn increment_errors(&self) {
-        self.errors.fetch_add(1, Ordering::Relaxed);
+    #[inline]
+    pub fn add_scanned(&self, count: u64) {
+        if count != 0 {
+            self.scanned.0.fetch_add(count, Ordering::Relaxed);
+        }
     }
 
-    pub fn log_error(&self, error: &str) {
-        if error.contains("Access is denied") {
+    pub fn record_error(&self, path: &Path, error: &std::io::Error) {
+        if error.kind() == ErrorKind::PermissionDenied {
             return;
         }
 
-        self.increment_errors();
+        self.errors.0.fetch_add(1, Ordering::Relaxed);
 
-        let mut guard = match self.log_file.lock() {
-            Ok(g) => g,
-            Err(_) => return,
+        let Ok(mut guard) = self.log.lock() else {
+            return;
         };
 
         if guard.is_none() {
@@ -63,35 +76,49 @@ impl SearchMetrics {
                 .ok();
         }
 
-        if let Some(file) = guard.as_mut() {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let formatted_time = format_timestamp(timestamp);
-            let _ = writeln!(file, "[{}] {}", formatted_time, error);
-            let _ = file.flush();
-        }
+        let Some(file) = guard.as_mut() else {
+            return;
+        };
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+
+        let mut line = Vec::with_capacity(128);
+        line.push(b'[');
+        write_timestamp(&mut line, timestamp);
+        line.extend_from_slice(b"] ");
+        line.extend_from_slice(&path_bytes(path));
+        line.extend_from_slice(b": ");
+        let _ = write!(line, "{error}");
+        line.push(b'\n');
+
+        let _ = file.write_all(&line);
     }
 
+    #[inline]
     pub fn get_found(&self) -> u64 {
-        self.found.load(Ordering::Relaxed)
+        self.found.0.load(Ordering::Relaxed)
     }
 
+    #[inline]
     pub fn get_scanned(&self) -> u64 {
-        self.scanned.load(Ordering::Relaxed)
+        self.scanned.0.load(Ordering::Relaxed)
     }
 
+    #[inline]
     pub fn get_errors(&self) -> u64 {
-        self.errors.load(Ordering::Relaxed)
+        self.errors.0.load(Ordering::Relaxed)
     }
 
+    #[inline]
     pub fn is_shutdown(&self) -> bool {
-        self.shutdown.load(Ordering::Relaxed)
+        self.shutdown.0.load(Ordering::Relaxed)
     }
 
+    #[inline]
     pub fn trigger_shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -108,23 +135,29 @@ impl SearchLimits {
         }
     }
 
+    #[inline]
+    pub fn found_limit(&self) -> Option<u64> {
+        self.found
+    }
+
+    #[inline]
     pub fn should_continue(&self, metrics: &SearchMetrics) -> bool {
         if metrics.is_shutdown() {
             return false;
         }
 
-        if let Some(limit) = self.found {
-            if metrics.get_found() >= limit {
-                metrics.trigger_shutdown();
-                return false;
-            }
+        if let Some(limit) = self.found
+            && metrics.get_found() >= limit
+        {
+            metrics.trigger_shutdown();
+            return false;
         }
 
-        if let Some(limit) = self.scanned {
-            if metrics.get_scanned() >= limit {
-                metrics.trigger_shutdown();
-                return false;
-            }
+        if let Some(limit) = self.scanned
+            && metrics.get_scanned() >= limit
+        {
+            metrics.trigger_shutdown();
+            return false;
         }
 
         true

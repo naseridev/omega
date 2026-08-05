@@ -9,10 +9,10 @@ fn main() {
         std::process::exit(1);
     }
 
-    let roots = match RootPathProvider::get_search_roots(args.path.clone()) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {}", e);
+    let roots = match RootPathProvider::get_search_roots(&args.path) {
+        Ok(roots) => roots,
+        Err(error) => {
+            eprintln!("error: {error}");
             std::process::exit(1);
         }
     };
@@ -20,10 +20,10 @@ fn main() {
     let hide_errors = args.hide_errors;
     let engine = SearchEngine::new(&args);
 
-    let result = match engine.search(roots) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("fatal error: {}", e);
+    let result = match engine.search(&roots) {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("fatal error: {error}");
             std::process::exit(1);
         }
     };
